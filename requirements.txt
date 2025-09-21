@@ -16,3 +16,6 @@ langchain-openai>=0.1.0
 langchain-community>=0.0.20
 langchain-chroma>=0.1.0
 tiktoken
+fastapi
+uvicorn
+python-multipart
