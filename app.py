@@ -1,15 +1,16 @@
 import os
 import io
 import re
-import time
 import uuid
+import hashlib
 from dataclasses import dataclass
-from typing import List, Dict, Tuple, Optional
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import streamlit as st
 
-# Parsing
+st.set_page_config(page_title="Intelligent Document Assistant", page_icon="🧠", layout="wide")
+
 import pandas as pd
 from PIL import Image
 
@@ -51,16 +52,9 @@ except Exception as e:
 # Chroma vector database
 try:
     import chromadb
-    from chromadb.config import Settings
 except Exception:
     st.error("ChromaDB not installed. Run: pip install chromadb")
     st.stop()
-
-# OpenAI
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
 
 # -----------------------------
 # Utilities and Configuration
@@ -72,74 +66,6 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str]:
-    """Split text into chunks with overlap."""
-    if not text.strip():
-        return []
-    
-    words = text.split()
-    if len(words) <= chunk_size:
-        return [text]
-    
-    chunks = []
-    start = 0
-    
-    while start < len(words):
-        end = min(start + chunk_size, len(words))
-        chunk = " ".join(words[start:end])
-        chunks.append(chunk)
-        
-        if end >= len(words):
-            break
-            
-        start = end - overlap
-        if start < 0:
-            start = 0
-    
-    return chunks
-
-
-def generate_answer(query: str, contexts: List) -> str:
-    """Generate answer using OpenAI or fallback to simple context summary."""
-    api_key = os.getenv("OPENAI_API_KEY")
-    
-    if not api_key:
-        return "Please provide an OpenAI API key to enable answer generation."
-    
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        
-        # Prepare context from search results
-        context_text = ""
-        for i, ctx in enumerate(contexts):
-            context_text += f"[Context {i+1}]: {ctx.text}\n\n"
-        
-        prompt = f"""Based on the following context, answer the user's question accurately and concisely.
-
-Context:
-{context_text}
-
-Question: {query}
-
-Answer:"""
-        
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that answers questions based on provided context. Always cite your sources."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=1000
-        )
-        
-        return response.choices[0].message.content
-        
-    except Exception as e:
-        return f"Error generating answer: {str(e)}"
-
-
 @dataclass
 class ConversationTurn:
     """Represents a single conversation turn."""
@@ -149,16 +75,9 @@ class ConversationTurn:
     timestamp: datetime
 
 
-@dataclass
-class DocumentChunk:
-    """Represents a document chunk with text and metadata."""
-    text: str
-    meta: Dict
-
-
 class DocumentProcessor:
     """Enhanced document processing with LangChain integration."""
-    
+
     def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
@@ -166,14 +85,14 @@ class DocumentProcessor:
             length_function=len,
             separators=["\n\n", "\n", " ", ""]
         )
-    
-    def process_documents(self, texts_and_metadata: List[Tuple[str, Dict]]) -> List[Document]:
+
+    def process_documents(self, texts_and_metadata: List[Tuple[str, Dict[str, Any]]]) -> List[Document]:
         """Process texts into LangChain documents with metadata."""
         documents = []
         for text, metadata in texts_and_metadata:
             if not text.strip():
                 continue
-            
+
             # Create document with metadata
             doc = Document(
                 page_content=clean_text(text),
@@ -183,10 +102,10 @@ class DocumentProcessor:
                     'doc_id': str(uuid.uuid4())
                 }
             )
-            
+
             # Split into chunks
             chunks = self.text_splitter.split_documents([doc])
-            
+
             # Add chunk-specific metadata
             for i, chunk in enumerate(chunks):
                 chunk.metadata.update({
@@ -194,9 +113,9 @@ class DocumentProcessor:
                     'chunk_index': i,
                     'total_chunks': len(chunks)
                 })
-            
+
             documents.extend(chunks)
-        
+
         return documents
 
 
@@ -286,218 +205,465 @@ LOADER_MAP = {
 # Enhanced Vector Store with Chroma
 # -----------------------------
 
+
 class EnhancedVectorStore:
-    """Enhanced vector store using Chroma with LangChain integration."""
-    
-    def __init__(self, collection_name: str = "documents", embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2", use_openai_embeddings: bool = False):
+    """Thin wrapper around a persistent Chroma vector store."""
+
+    def __init__(
+        self,
+        collection_name: str,
+        embedding_model: str,
+        use_openai_embeddings: bool = False,
+        persist_path: str = "./chroma_db",
+    ) -> None:
         self.collection_name = collection_name
         self.embedding_model = embedding_model
         self.use_openai_embeddings = use_openai_embeddings
-        self.vectorstore = None
-        self.embeddings = None
-        self._initialize_embeddings()
-        self._initialize_vectorstore()
-    
+        self.persist_path = persist_path
+        self.embeddings = self._initialize_embeddings()
+        self.client = chromadb.PersistentClient(path=self.persist_path)
+        self.vectorstore = self._create_vectorstore()
+
     def _initialize_embeddings(self):
-        """Initialize embedding model."""
+        """Create an embedding function for the vector store."""
+
         if self.use_openai_embeddings and os.getenv("OPENAI_API_KEY"):
             try:
-                self.embeddings = OpenAIEmbeddings()
-            except Exception as e:
-                st.warning(f"Failed to initialize OpenAI embeddings: {e}. Falling back to SentenceTransformer.")
-                self.embeddings = SentenceTransformerEmbeddings(model_name=self.embedding_model)
-        else:
-            self.embeddings = SentenceTransformerEmbeddings(model_name=self.embedding_model)
-    
-    def _initialize_vectorstore(self):
-        """Initialize Chroma vector store."""
+                return OpenAIEmbeddings()
+            except Exception as exc:  # pragma: no cover - best-effort warning
+                st.warning(
+                    f"Failed to initialize OpenAI embeddings: {exc}. Falling back to SentenceTransformer embeddings."
+                )
+
+        return SentenceTransformerEmbeddings(model_name=self.embedding_model)
+
+    def _create_vectorstore(self):
+        """Create or retrieve a persistent Chroma collection."""
+
         try:
-            # Create persistent Chroma client
-            chroma_client = chromadb.PersistentClient(path="./chroma_db")
-            
-            self.vectorstore = Chroma(
-                client=chroma_client,
+            return Chroma(
+                client=self.client,
                 collection_name=self.collection_name,
                 embedding_function=self.embeddings,
             )
-        except Exception as e:
-            st.error(f"Failed to initialize Chroma vector store: {e}")
+        except Exception as exc:  # pragma: no cover - hard failure
+            st.error(f"Failed to initialize Chroma vector store: {exc}")
             st.stop()
-    
-    def add_documents(self, documents: List[Document]):
-        """Add documents to the vector store."""
+
+    def add_documents(self, documents: List[Document]) -> int:
+        """Add documents to the vector store and return how many were indexed."""
+
         if not documents:
-            return
-        
+            return 0
+
         try:
             self.vectorstore.add_documents(documents)
-        except Exception as e:
-            st.error(f"Failed to add documents to vector store: {e}")
-    
+            return len(documents)
+        except Exception as exc:
+            st.error(f"Failed to add documents to the vector store: {exc}")
+            return 0
+
     def similarity_search_with_score(self, query: str, k: int = 5):
-        """Search for similar documents with scores."""
+        """Retrieve the top-k documents with similarity scores."""
+
         try:
             return self.vectorstore.similarity_search_with_score(query, k=k)
-        except Exception as e:
-            st.error(f"Failed to search vector store: {e}")
+        except Exception as exc:
+            st.error(f"Vector search failed: {exc}")
             return []
-    
-    def get_retriever(self, search_kwargs: Dict = None):
-        """Get a retriever for use with LangChain chains."""
+
+    def get_retriever(self, search_kwargs: Optional[Dict[str, Any]] = None):
+        """Expose the LangChain retriever interface."""
+
         if search_kwargs is None:
             search_kwargs = {"k": 5}
         return self.vectorstore.as_retriever(search_kwargs=search_kwargs)
-    
+
     def get_collection_count(self) -> int:
-        """Get the number of documents in the collection."""
+        """Return the number of vectors stored in the underlying collection."""
+
         try:
             return self.vectorstore._collection.count()
-        except:
+        except Exception:
             return 0
 
+    def clear(self) -> None:
+        """Remove the current collection and recreate an empty one."""
+
+        try:
+            self.client.delete_collection(self.collection_name)
+        except Exception:
+            # If the collection does not exist we can safely ignore the error.
+            pass
+        self.vectorstore = self._create_vectorstore()
+
 
 # -----------------------------
-# VectorIndex Class (Wrapper for EnhancedVectorStore)
+# Vector index that handles chunking & ingestion
 # -----------------------------
+
 
 class VectorIndex:
-    """Vector index wrapper for compatibility with existing Streamlit code."""
-    
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    """Helper around the enhanced vector store to manage document ingestion."""
+
+    def __init__(
+        self,
+        collection_name: str,
+        model_name: str,
+        chunk_size: int,
+        chunk_overlap: int,
+        use_openai_embeddings: bool = False,
+    ) -> None:
+        self.collection_name = collection_name
         self.model_name = model_name
-        self.vectorstore = EnhancedVectorStore(
-            collection_name="documents",
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.vector_store = EnhancedVectorStore(
+            collection_name=collection_name,
             embedding_model=model_name,
-            use_openai_embeddings=False
+            use_openai_embeddings=use_openai_embeddings,
         )
-        self.document_processor = DocumentProcessor()
-        # Add embeddings attribute for compatibility
-        self.embeddings = self.vectorstore.embeddings
-    
-    def add_documents(self, texts_and_metadata: List[Tuple[str, Dict]]):
-        """Add documents to the vector index."""
+        self.document_processor = DocumentProcessor(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
+    def update_chunking(self, chunk_size: int, chunk_overlap: int) -> None:
+        """Update the chunking configuration for future ingestions."""
+
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.document_processor = DocumentProcessor(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+
+    def add_documents(self, texts_and_metadata: List[Tuple[str, Dict[str, Any]]]) -> Tuple[int, Dict[str, int]]:
+        """Add raw texts with metadata and return chunk statistics."""
+
         documents = self.document_processor.process_documents(texts_and_metadata)
-        self.vectorstore.add_documents(documents)
-    
-    def add(self, chunks: List[DocumentChunk]):
-        """Add DocumentChunk objects to the vector index."""
-        texts_and_metadata = [(chunk.text, chunk.meta) for chunk in chunks]
-        self.add_documents(texts_and_metadata)
-    
+        indexed = self.vector_store.add_documents(documents)
+        per_source: Dict[str, int] = {}
+
+        for doc in documents:
+            source_name = doc.metadata.get("source", "Unknown source")
+            per_source[source_name] = per_source.get(source_name, 0) + 1
+
+        return indexed, per_source
+
     def similarity_search_with_score(self, query: str, k: int = 5):
-        """Search for similar documents with scores."""
-        return self.vectorstore.similarity_search_with_score(query, k=k)
-    
-    def get_retriever(self, search_kwargs: Dict = None):
-        """Get a retriever for use with LangChain chains."""
-        return self.vectorstore.get_retriever(search_kwargs)
-    
+        return self.vector_store.similarity_search_with_score(query, k=k)
+
+    def get_retriever(self, k: int = 5):
+        return self.vector_store.get_retriever({"k": k})
+
     def get_collection_count(self) -> int:
-        """Get the number of documents in the collection."""
-        return self.vectorstore.get_collection_count()
+        return self.vector_store.get_collection_count()
 
 
 # -----------------------------
-# Enhanced Q&A System with LangChain
+# Conversational QA system with memory & citations
 # -----------------------------
+
 
 class ConversationalQASystem:
-    """Enhanced Q&A system with conversation memory and better source citations."""
-    
-    def __init__(self, vector_store: EnhancedVectorStore, memory_window: int = 10):
-        self.vector_store = vector_store
+    """Conversational question answering on top of the indexed documents."""
+
+    def __init__(self, vector_index: VectorIndex, top_k: int = 5, memory_window: int = 6) -> None:
+        self.vector_index = vector_index
+        self.top_k = top_k
         self.memory_window = memory_window
         self.conversation_memory = ConversationBufferWindowMemory(
             k=memory_window,
             memory_key="chat_history",
+            input_key="question",
+            output_key="answer",
             return_messages=True,
-            output_key="answer"
         )
         self.qa_chain = None
         self._initialize_qa_chain()
-    
-    def _initialize_qa_chain(self):
-        """Initialize the conversational QA chain."""
+
+    def _initialize_qa_chain(self) -> None:
         api_key = os.getenv("OPENAI_API_KEY")
-        
-        if api_key:
-            try:
-                # Use OpenAI for generation
-                llm = ChatOpenAI(
-                    model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                    temperature=0.2,
-                    api_key=api_key
-                )
-                
-                # Custom prompt template with better source citations
-                custom_prompt = PromptTemplate(
-                    template="""You are an intelligent document assistant. Use the provided context to answer the user's question accurately and concisely.
 
-IMPORTANT INSTRUCTIONS:
-1. Always cite your sources using the format [Source: filename] when referencing information
-2. If information comes from multiple sources, cite all relevant sources
-3. If you cannot find the answer in the provided context, clearly state that you don't have enough information
-4. Provide specific, actionable answers when possible
-5. Consider the conversation history for context
+        if not api_key:
+            self.qa_chain = None
+            return
 
-Chat History:
+        try:
+            llm = ChatOpenAI(
+                model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                temperature=0.2,
+                api_key=api_key,
+            )
+
+            custom_prompt = PromptTemplate(
+                template="""
+You are an intelligent document assistant. Answer the question using ONLY the provided context.
+
+Requirements:
+- Ground every statement in the retrieved context.
+- Cite each supporting document inline using the format [Source: <filename>].
+- If multiple documents contribute, cite each of them.
+- If the answer is not in the context, say that the documents do not contain the information.
+
+Conversation so far:
 {chat_history}
 
-Context from documents:
+Context:
 {context}
 
-Human Question: {question}
+Question: {question}
+
+Answer:
 """.strip(),
-                    input_variables=["chat_history", "context", "question"]
-                )
-                
-                # Create the conversational retrieval chain
-                self.qa_chain = ConversationalRetrievalChain.from_llm(
-                    llm=llm,
-                    retriever=self.vector_index.vectorstore.as_retriever(search_kwargs={"k": 5}),
-                    combine_docs_chain_kwargs={"prompt": custom_prompt},
-                    return_source_documents=True,
-                    verbose=True
-                )
-                
-            except Exception as e:
-                st.error(f"Failed to initialize OpenAI: {e}")
-                self.qa_chain = None
-        else:
+                input_variables=["context", "chat_history", "question"],
+            )
+
+            retriever = self.vector_index.get_retriever(self.top_k)
+
+            self.qa_chain = ConversationalRetrievalChain.from_llm(
+                llm=llm,
+                retriever=retriever,
+                combine_docs_chain_kwargs={"prompt": custom_prompt},
+                return_source_documents=True,
+            )
+        except Exception as exc:  # pragma: no cover - runtime safety
+            st.error(f"Failed to initialize the OpenAI chat model: {exc}")
             self.qa_chain = None
 
-    def get_answer(self, question: str, chat_history: List[Tuple[str, str]] = None) -> Dict:
-        """Get answer using the QA chain."""
+    def reset_memory(self) -> None:
+        self.conversation_memory.clear()
+
+    def get_answer(self, question: str) -> Dict[str, Any]:
         if not self.qa_chain:
             return {
                 "answer": "Please provide an OpenAI API key to enable answer generation.",
-                "source_documents": []
-            }
-        
-        if chat_history is None:
-            chat_history = []
-        
-        try:
-            result = self.qa_chain({
-                "question": question,
-                "chat_history": chat_history
-            })
-            return result
-        except Exception as e:
-            return {
-                "answer": f"Error generating answer: {str(e)}",
-                "source_documents": []
+                "source_documents": [],
             }
 
-# Streamlit UI
-st.title("🧠 Intelligent Document Assistant — Prototype")
+        chat_history = self.conversation_memory.load_memory_variables({}).get("chat_history", [])
+
+        try:
+            if hasattr(self.qa_chain, "invoke"):
+                result = self.qa_chain.invoke({"question": question, "chat_history": chat_history})
+            else:  # Fallback for older LangChain versions
+                result = self.qa_chain({"question": question, "chat_history": chat_history})
+        except Exception as exc:
+            return {
+                "answer": f"Error generating answer: {exc}",
+                "source_documents": [],
+            }
+
+        self.conversation_memory.save_context({"question": question}, {"answer": result.get("answer", "")})
+        return result
+
+    @staticmethod
+    def build_citations(source_documents: List[Document]) -> List[str]:
+        citations: List[str] = []
+        seen: Set[str] = set()
+
+        for doc in source_documents or []:
+            metadata = doc.metadata or {}
+            source_name = metadata.get("source", "Unknown source")
+            page = metadata.get("page")
+            chunk_index = metadata.get("chunk_index")
+            total_chunks = metadata.get("total_chunks")
+
+            details = source_name
+            if page is not None:
+                details += f", page {page}"
+            if chunk_index is not None and total_chunks is not None:
+                details += f", chunk {chunk_index + 1}/{total_chunks}"
+
+            citation = f"[Source: {details}]"
+            if citation not in seen:
+                seen.add(citation)
+                citations.append(citation)
+
+        return citations
+
+
+# -----------------------------
+# Helper utilities for Streamlit state management
+# -----------------------------
+
+
+def ensure_state_defaults() -> None:
+    st.session_state.setdefault("conversation_turns", [])
+    st.session_state.setdefault("last_contexts", [])
+    st.session_state.setdefault("indexed_file_hashes", set())
+
+
+def ensure_vector_index(model_name: str, chunk_size: int, chunk_overlap: int) -> VectorIndex:
+    ensure_state_defaults()
+
+    settings = {
+        "model_name": model_name,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+    }
+
+    reset_index = False
+
+    if "index_settings" not in st.session_state:
+        reset_index = True
+    elif st.session_state.get("index_settings") != settings:
+        reset_index = True
+
+    if reset_index or "vector_index" not in st.session_state:
+        st.session_state["index_settings"] = settings
+        st.session_state["collection_name"] = f"documents_{uuid.uuid4().hex[:8]}"
+        st.session_state["vector_index"] = VectorIndex(
+            collection_name=st.session_state["collection_name"],
+            model_name=model_name,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+        st.session_state["conversation_turns"] = []
+        st.session_state["last_contexts"] = []
+        st.session_state["indexed_file_hashes"] = set()
+        st.session_state["qa_system"] = None
+
+    return st.session_state["vector_index"]
+
+
+def ensure_qa_system(vector_index: VectorIndex, top_k: int, memory_window: int) -> ConversationalQASystem:
+    qa_system: Optional[ConversationalQASystem] = st.session_state.get("qa_system")
+
+    api_key_available = bool(os.getenv("OPENAI_API_KEY"))
+    if st.session_state.get("api_key_available") != api_key_available:
+        st.session_state["api_key_available"] = api_key_available
+        qa_system = None
+
+    if (
+        qa_system is None
+        or qa_system.vector_index is not vector_index
+        or qa_system.top_k != top_k
+        or qa_system.memory_window != memory_window
+    ):
+        qa_system = ConversationalQASystem(vector_index, top_k=top_k, memory_window=memory_window)
+        st.session_state["qa_system"] = qa_system
+
+    return qa_system
+
+
+def ingest_uploaded_files(uploaded_files, vector_index: VectorIndex):
+    texts_and_metadata: List[Tuple[str, Dict[str, Any]]] = []
+    skipped_duplicates: List[str] = []
+    unsupported_files: List[str] = []
+    empty_files: List[str] = []
+    failed_files: List[Tuple[str, str]] = []
+    ingested_hashes: Set[str] = st.session_state.setdefault("indexed_file_hashes", set())
+    pending_hashes: List[str] = []
+
+    for uploaded_file in uploaded_files:
+        filename = uploaded_file.name
+        suffix = os.path.splitext(filename)[1].lower()
+        loader = LOADER_MAP.get(suffix)
+
+        if not loader:
+            unsupported_files.append(filename)
+            continue
+
+        file_bytes = uploaded_file.getvalue()
+        file_hash = hashlib.md5(file_bytes).hexdigest()
+
+        if file_hash in ingested_hashes:
+            skipped_duplicates.append(filename)
+            continue
+
+        buffer = io.BytesIO(file_bytes)
+        buffer.seek(0)
+
+        try:
+            raw_text = loader(buffer)
+        except Exception as exc:
+            failed_files.append((filename, str(exc)))
+            continue
+
+        cleaned_text = clean_text(raw_text)
+        if not cleaned_text:
+            empty_files.append(filename)
+            continue
+
+        metadata = {
+            "source": filename,
+            "file_type": suffix.lstrip("."),
+            "file_hash": file_hash,
+            "ingested_at": datetime.utcnow().isoformat(),
+            "chunk_size": vector_index.chunk_size,
+            "chunk_overlap": vector_index.chunk_overlap,
+        }
+
+        texts_and_metadata.append((cleaned_text, metadata))
+        pending_hashes.append(file_hash)
+
+    if not texts_and_metadata:
+        return {
+            "total_chunks": 0,
+            "per_source": {},
+            "skipped": skipped_duplicates,
+            "unsupported": unsupported_files,
+            "empty": empty_files,
+            "failed": failed_files,
+        }
+
+    total_chunks, per_source = vector_index.add_documents(texts_and_metadata)
+
+    if total_chunks:
+        for file_hash in pending_hashes:
+            ingested_hashes.add(file_hash)
+
+    return {
+        "total_chunks": total_chunks,
+        "per_source": per_source,
+        "skipped": skipped_duplicates,
+        "unsupported": unsupported_files,
+        "empty": empty_files,
+        "failed": failed_files,
+    }
+
+
+def build_context_summaries(similarity_results) -> List[Dict[str, Any]]:
+    summaries: List[Dict[str, Any]] = []
+
+    for item in similarity_results:
+        if isinstance(item, tuple) and len(item) == 2:
+            doc, score = item
+        else:
+            doc, score = item, None
+
+        metadata = doc.metadata or {}
+        summaries.append(
+            {
+                "source": metadata.get("source", "Unknown source"),
+                "chunk_index": metadata.get("chunk_index"),
+                "total_chunks": metadata.get("total_chunks"),
+                "score": score,
+                "text": doc.page_content,
+            }
+        )
+
+    return summaries
+
+
+# -----------------------------
+# Streamlit interface
+# -----------------------------
+
+
+st.title("🧠 Intelligent Document Assistant")
+st.caption(
+    "Upload multi-format documents, index them into a vector database, and ask grounded questions with cited answers."
+)
 
 with st.sidebar:
-    st.header("Settings")
-    st.markdown("Provide your OpenAI API key to enable answer generation (optional).")
-    api_key_input = st.text_input("OPENAI_API_KEY", type="password", help="Used locally in your session only.")
+    st.header("Configuration")
+    st.markdown("Provide your OpenAI API key to enable answer generation.")
+    api_key_input = st.text_input("OpenAI API Key", type="password", help="Stored only in your local session.")
     if api_key_input:
-        os.environ["OPENAI_API_KEY"] = api_key_input
+        os.environ["OPENAI_API_KEY"] = api_key_input.strip()
 
     model_name = st.selectbox(
         "Embedding model",
@@ -507,116 +673,198 @@ with st.sidebar:
             "sentence-transformers/paraphrase-MiniLM-L6-v2",
         ],
         index=0,
-        help="MiniLM-L6-v2 is fast and good enough for prototypes.",
+        help="MiniLM models offer a good balance between speed and quality.",
     )
 
-    chunk_size = st.slider("Chunk size (words)", 200, 1200, 500, step=50)
-    overlap = st.slider("Chunk overlap (words)", 0, 400, 100, step=10)
+    chunk_size = st.slider("Chunk size (characters)", min_value=500, max_value=3000, value=1200, step=100)
+    chunk_overlap = st.slider("Chunk overlap", min_value=0, max_value=600, value=200, step=50)
+    if chunk_overlap >= chunk_size:
+        st.info("Chunk overlap adjusted to be smaller than the chunk size.")
+        chunk_overlap = max(0, chunk_size - 200)
 
-    top_k = st.slider("Top-K chunks to retrieve", 1, 10, 5)
+    top_k = st.slider("Top-K chunks to retrieve", min_value=1, max_value=10, value=5)
+    memory_window = st.slider(
+        "Conversation memory (turns)",
+        min_value=1,
+        max_value=20,
+        value=6,
+        help="How many previous exchanges to keep in the conversation buffer.",
+    )
 
-st.markdown(
-    "Upload multiple files (PDF, DOCX, PPTX, TXT, MD, CSV/XLSX, PNG/JPG). I'll parse, chunk, and index them for Q&A."
-)
+    st.markdown("---")
+    if st.button("Clear chat history"):
+        ensure_state_defaults()
+        st.session_state["conversation_turns"] = []
+        st.session_state["last_contexts"] = []
+        qa_system = st.session_state.get("qa_system")
+        if qa_system:
+            qa_system.reset_memory()
+        st.success("Conversation cleared.")
 
-uploaded_files = st.file_uploader(
-    "Upload documents", type=list(LOADER_MAP.keys()), accept_multiple_files=True
-)
+    if st.button("Reset indexed documents"):
+        for key in ["vector_index", "index_settings", "collection_name"]:
+            st.session_state.pop(key, None)
+        st.session_state["indexed_file_hashes"] = set()
+        st.session_state["conversation_turns"] = []
+        st.session_state["last_contexts"] = []
+        st.session_state["qa_system"] = None
+        st.success("Vector index reset. Upload documents again to re-index.")
 
-index_state = st.session_state.get("vindex")
-if index_state is None:
-    st.session_state["vindex"] = VectorIndex(model_name=model_name)
-    index_state = st.session_state["vindex"]
+vector_index = ensure_vector_index(model_name, chunk_size, chunk_overlap)
+qa_system = ensure_qa_system(vector_index, top_k, memory_window)
 
-# If user changed embedding model, reset the index
-if index_state.model_name != model_name:
-    st.info("Embedding model changed — resetting the index.")
-    st.session_state["vindex"] = VectorIndex(model_name=model_name)
-    index_state = st.session_state["vindex"]
+col_main, col_info = st.columns([2, 1])
 
-col_left, col_right = st.columns([2, 1])
+with col_main:
+    st.subheader("1. Upload & index your documents")
+    uploaded_files = st.file_uploader(
+        "Upload documents",
+        type=list(LOADER_MAP.keys()),
+        accept_multiple_files=True,
+        help="PDF, Word, PowerPoint, text, markdown, spreadsheets, and common image formats are supported.",
+    )
 
-with col_left:
     if uploaded_files:
-        new_chunks: List[DocumentChunk] = []
-        for up in uploaded_files:
-            name = up.name
-            suffix = os.path.splitext(name)[1].lower()
-            loader = LOADER_MAP.get(suffix)
-            if not loader:
-                st.warning(f"Unsupported file type: {suffix}")
-                continue
-            try:
-                text = loader(up)
-            except Exception as e:
-                st.error(f"Failed to read {name}: {e}")
-                text = ""
-            text = clean_text(text)
-            if not text:
-                st.warning(f"No text extracted from {name}")
-                continue
-            chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
-            for ch in chunks:
-                new_chunks.append(DocumentChunk(text=ch, meta={"source": name}))
-        if new_chunks:
-            with st.spinner("Indexing new chunks ..."):
-                index_state.add(new_chunks)
-            st.success(f"Indexed {len(new_chunks)} chunks from {len(uploaded_files)} file(s).")
+        st.info("Click **Index documents** after selecting files to add them to the knowledge base.")
+        if st.button("Index documents", use_container_width=True):
+            with st.spinner("Extracting text and updating the vector database..."):
+                ingestion_result = ingest_uploaded_files(uploaded_files, vector_index)
 
-    st.subheader("Ask questions about your documents")
-    query = st.text_input("Your question")
-    ask = st.button("🔎 Retrieve & Answer", type="primary", use_container_width=True)
+            total_chunks = ingestion_result["total_chunks"]
+            if total_chunks:
+                st.success(
+                    f"Indexed {total_chunks} chunk(s) from {len(ingestion_result['per_source'])} document(s)."
+                )
+                for source_name, count in ingestion_result["per_source"].items():
+                    st.caption(f"• {source_name}: {count} chunk(s)")
+            else:
+                st.info("No new content was indexed.")
 
-    if ask and query.strip():
-        with st.spinner("Retrieving relevant chunks ..."):
-            results = index_state.query(query, top_k=top_k)
-        if not results:
-            st.warning("Index is empty or nothing found. Upload files first.")
-        else:
-            contexts = [dc for sim, dc in results]
-            st.write("### Top matches")
-            for i, (sim, dc) in enumerate(results, start=1):
-                with st.expander(f"[S{i}] {dc.meta.get('source','unknown')} — similarity {sim:.3f}"):
-                    st.write(dc.text)
-
-            with st.spinner("Generating answer ..."):
-                answer = generate_answer(query, contexts)
-            st.write("### Answer")
-            st.write(answer)
-
-with col_right:
-    st.subheader("Index status")
-    n = index_state.get_collection_count()
-    st.metric("Chunks indexed", n)
-    st.caption("Re-upload files anytime to add more chunks. Changing the embedding model resets the index.")
+            if ingestion_result["unsupported"]:
+                st.warning(
+                    "Unsupported file types: " + ", ".join(sorted(set(ingestion_result["unsupported"])))
+                )
+            if ingestion_result["skipped"]:
+                st.info("Skipped previously indexed files: " + ", ".join(ingestion_result["skipped"]))
+            if ingestion_result["empty"]:
+                st.warning("No text detected in: " + ", ".join(ingestion_result["empty"]))
+            if ingestion_result["failed"]:
+                for filename, error_msg in ingestion_result["failed"]:
+                    st.error(f"Failed to process {filename}: {error_msg}")
 
     st.divider()
-    st.subheader("Quick Tips")
+    st.subheader("2. Chat with your documents")
+    chat_container = st.container()
+    context_container = st.container()
+
+with chat_container:
+    if not st.session_state["conversation_turns"]:
+        st.info("Ask your first question to begin the conversation.")
+    else:
+        for turn in st.session_state["conversation_turns"]:
+            with st.chat_message("user"):
+                st.markdown(turn.question)
+            with st.chat_message("assistant"):
+                st.markdown(turn.answer)
+                if turn.sources:
+                    st.markdown("**Sources:** " + ", ".join(turn.sources))
+                st.caption(turn.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+
+with context_container:
+    if st.session_state["last_contexts"]:
+        st.markdown("### Retrieved context from the last answer")
+        for idx, ctx in enumerate(st.session_state["last_contexts"], start=1):
+            title = f"[{idx}] {ctx['source']}"
+            if ctx.get("score") is not None:
+                title += f" — similarity {ctx['score']:.3f}"
+            with st.expander(title, expanded=False):
+                meta_bits = []
+                if ctx.get("chunk_index") is not None and ctx.get("total_chunks") is not None:
+                    meta_bits.append(f"Chunk {ctx['chunk_index'] + 1} of {ctx['total_chunks']}")
+                if meta_bits:
+                    st.caption(" | ".join(meta_bits))
+                st.write(ctx["text"])
+
+user_question = st.chat_input("Ask a question about your indexed documents")
+
+if user_question:
+    with chat_container:
+        with st.chat_message("user"):
+            st.markdown(user_question)
+
+    if vector_index.get_collection_count() == 0:
+        assistant_response = "Please upload and index documents before asking questions."
+        with chat_container:
+            with st.chat_message("assistant"):
+                st.markdown(assistant_response)
+        st.session_state["conversation_turns"].append(
+            ConversationTurn(
+                question=user_question,
+                answer=assistant_response,
+                sources=[],
+                timestamp=datetime.utcnow(),
+            )
+        )
+    else:
+        result = qa_system.get_answer(user_question)
+        answer_text = result.get("answer", "I wasn't able to generate an answer.")
+        citations = ConversationalQASystem.build_citations(result.get("source_documents", []))
+
+        with chat_container:
+            with st.chat_message("assistant"):
+                st.markdown(answer_text)
+                if citations:
+                    st.markdown("**Sources:** " + ", ".join(citations))
+
+        st.session_state["conversation_turns"].append(
+            ConversationTurn(
+                question=user_question,
+                answer=answer_text,
+                sources=citations,
+                timestamp=datetime.utcnow(),
+            )
+        )
+
+        similarity_results = vector_index.similarity_search_with_score(user_question, k=top_k)
+        st.session_state["last_contexts"] = build_context_summaries(similarity_results)
+
+        with context_container:
+            context_container.empty()
+            if st.session_state["last_contexts"]:
+                st.markdown("### Retrieved context from the last answer")
+                for idx, ctx in enumerate(st.session_state["last_contexts"], start=1):
+                    title = f"[{idx}] {ctx['source']}"
+                    if ctx.get("score") is not None:
+                        title += f" — similarity {ctx['score']:.3f}"
+                    with st.expander(title, expanded=False):
+                        meta_bits = []
+                        if ctx.get("chunk_index") is not None and ctx.get("total_chunks") is not None:
+                            meta_bits.append(
+                                f"Chunk {ctx['chunk_index'] + 1} of {ctx['total_chunks']}"
+                            )
+                        if meta_bits:
+                            st.caption(" | ".join(meta_bits))
+                        st.write(ctx["text"])
+
+with col_info:
+    st.subheader("Index status")
+    st.metric("Chunks indexed", vector_index.get_collection_count())
+    st.caption(
+        "Indexing is session-scoped. Changing the embedding model or chunking parameters rebuilds the collection."
+    )
+
+    st.markdown("---")
+    st.subheader("Conversation")
+    st.metric("Stored turns", len(st.session_state["conversation_turns"]))
+    st.caption("Conversation history is kept locally in your browser session and is never uploaded.")
+
+    st.markdown("---")
+    st.subheader("Tips")
     st.markdown(
         """
-        - Provide an **OpenAI API key** in the sidebar to enable LLM-generated answers.\
-        - Tune **chunk size/overlap** for your content: smaller for slides, larger for reports.\
-        - OCR for images requires **pytesseract** and the **Tesseract** binary installed locally.\
-        - Supported types: PDF, DOCX, PPTX, TXT, MD, CSV/XLSX, PNG/JPG.
+- Provide an **OpenAI API key** to enable grounded answer generation. Without it you'll still see retrieved context.
+- Adjust **chunk size/overlap** based on the document type. Smaller chunks work well for slides, larger for reports.
+- Image ingestion uses OCR via `pytesseract`; ensure the Tesseract binary is installed locally if you plan to use it.
+- Chroma persists to `./chroma_db`. Reset the index from the sidebar to start fresh.
         """
     )
-
-st.divider()
-with st.expander("📦 Setup (requirements.txt)"):
-    st.code(
-        """
-        streamlit
-        pdfplumber
-        python-docx
-        python-pptx
-        pandas
-        pillow
-        sentence-transformers
-        scikit-learn
-        openai>=1.0.0
-        pytesseract
-        """.strip(),
-        language="text",
-    )
-
-st.caption("Prototype built for multi-format ingestion, semantic retrieval, and optional LLM answers. Extend with persistent storage (FAISS/Chroma), auth, and background indexing for production.")
