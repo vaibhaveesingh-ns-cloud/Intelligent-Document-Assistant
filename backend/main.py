@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import traceback
 from typing import List, Optional
 from uuid import uuid4
 
@@ -9,9 +11,13 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .config import config
-from .services.assistant import DocumentAssistant
-from .services.loaders import MissingDependencyError, UnsupportedFileTypeError, SUPPORTED_EXTENSIONS
+from backend.config import config
+from backend.services.assistant import DocumentAssistant
+from backend.services.loaders import MissingDependencyError, UnsupportedFileTypeError, SUPPORTED_EXTENSIONS
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="DocuAssist API", version="0.1.0")
 
@@ -55,6 +61,17 @@ class ChatResponse(BaseModel):
 def health_check() -> dict:
     return {"status": "ok"}
 
+@app.get("/api/test-assistant")
+def test_assistant() -> dict:
+    try:
+        # Test if assistant can be initialized
+        test_assistant = DocumentAssistant()
+        return {"status": "ok", "message": "Assistant initialized successfully"}
+    except Exception as exc:
+        logger.error(f"Assistant initialization failed: {exc}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {"status": "error", "message": str(exc)}
+
 
 @app.get("/api/config")
 def configuration() -> dict:
@@ -88,6 +105,7 @@ async def upload_documents(
         uploads.append((file.filename, await file.read()))
 
     try:
+        logger.info(f"Processing {len(uploads)} files for upload")
         result = assistant.ingest_documents(
             uploads,
             chunk_size=chunk_size,
@@ -97,12 +115,20 @@ async def upload_documents(
             local_embedding_model=local_embedding_model,
             openai_api_key=openai_api_key,
         )
+        logger.info(f"Successfully processed upload: {result}")
     except UnsupportedFileTypeError as exc:  # pragma: no cover - runtime validation
+        logger.error(f"Unsupported file type: {exc}")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MissingDependencyError as exc:  # pragma: no cover - runtime validation
+        logger.error(f"Missing dependency: {exc}")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except ValueError as exc:
+        logger.error(f"Value error: {exc}")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(f"Unexpected error during upload: {exc}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(exc)}") from exc
 
     return UploadResponse(**result)
 

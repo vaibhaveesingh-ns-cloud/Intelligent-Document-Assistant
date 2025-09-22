@@ -12,9 +12,9 @@ from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_chroma import Chroma
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-from ..config import config
-from .loaders import extract_text_from_bytes
-from .processor import DocumentProcessor, RawDocument, build_raw_documents
+from backend.config import config
+from backend.services.loaders import extract_text_from_bytes
+from backend.services.processor import DocumentProcessor, RawDocument, build_raw_documents
 
 
 @dataclass
@@ -67,10 +67,19 @@ class DocumentAssistant:
 
     def _ensure_vector_store(self, descriptor: str, embeddings) -> Chroma:
         if self._vector_store is None:
+            import chromadb
+            from chromadb.config import Settings
+            
+            # Create persistent Chroma client
+            chroma_client = chromadb.PersistentClient(
+                path=config.chroma_persist_directory,
+                settings=Settings(anonymized_telemetry=False)
+            )
+            
             self._vector_store = Chroma(
+                client=chroma_client,
                 collection_name=config.collection_name,
                 embedding_function=embeddings,
-                persist_directory=config.chroma_persist_directory,
             )
             self._embedding_descriptor = descriptor
             self._hydrate_hash_cache()
@@ -147,7 +156,7 @@ class DocumentAssistant:
 
         if documents:
             vector_store.add_documents(documents)
-            vector_store.persist()
+            # ChromaDB persistence is handled automatically with PersistentClient
 
         return {"ingested": len(documents), "skipped": skipped}
 

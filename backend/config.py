@@ -16,9 +16,10 @@ class AppConfig:
     default_llm_model: str = "gpt-3.5-turbo"
     allowed_origins: List[str] = field(
         default_factory=lambda: [
-            "*",
             "http://localhost:5173",
             "http://localhost:3000",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:3000",
         ]
     )
 
