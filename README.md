@@ -16,15 +16,23 @@ A React + FastAPI application for document Q&A with vector search, conversation 
 
 ### Prerequisites
 - Docker and Docker Compose
-- Optional: OpenAI API key for LLM features
+- OpenAI API key for LLM features
+
+### Environment Setup
+
+1. **Configure API Key**:
+   ```bash
+   # Copy the example environment file
+   cp .env.example .env
+   
+   # Edit .env and add your OpenAI API key
+   # OPENAI_API_KEY=sk-your-actual-key-here
+   ```
 
 ### Running with Docker
 
 1. Clone the repository and navigate to the project directory
-2. Set your OpenAI API key (optional):
-   ```bash
-   export OPENAI_API_KEY=sk-your-key-here
-   ```
+2. Set up your `.env` file (see Environment Setup above)
 3. Start the services:
    ```bash
    docker compose up --build
@@ -44,7 +52,12 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the server (choose one method)
+# Set up environment variables (see Environment Setup above)
+
+# Run the Streamlit app
+streamlit run app.py
+
+# OR run the FastAPI server
 python run_backend.py
 # OR
 uvicorn backend.main:app --reload --port 8000
@@ -66,10 +79,20 @@ npm run dev
 
 ## Configuration
 
-The application uses environment variables for configuration:
+The application uses environment variables for configuration. Create a `.env` file in the project root:
 
-- `OPENAI_API_KEY` - Your OpenAI API key (optional)
-- `VITE_API_BASE_URL` - Frontend API base URL (defaults to empty for proxy)
+```bash
+# Required: OpenAI API key for LLM features
+OPENAI_API_KEY=sk-your-actual-key-here
+
+# Optional: OpenAI model (defaults to gpt-4o-mini)
+OPENAI_MODEL=gpt-4o-mini
+
+# Frontend configuration
+VITE_API_BASE_URL=  # Frontend API base URL (defaults to empty for proxy)
+```
+
+**Security Note**: The `.env` file is automatically excluded from version control via `.gitignore` to protect your API keys.
 
 ## Docker Volumes
 

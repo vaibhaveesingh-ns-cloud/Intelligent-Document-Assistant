@@ -1,6 +1,7 @@
 streamlit
 setuptools
 wheel
+python-dotenv
 pdfplumber
 python-docx
 python-pptx

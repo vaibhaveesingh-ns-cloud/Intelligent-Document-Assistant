@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 import streamlit as st
 
 st.set_page_config(page_title="Intelligent Document Assistant", page_icon="🧠", layout="wide")
@@ -660,10 +664,19 @@ st.caption(
 
 with st.sidebar:
     st.header("Configuration")
-    st.markdown("Provide your OpenAI API key to enable answer generation.")
-    api_key_input = st.text_input("OpenAI API Key", type="password", help="Stored only in your local session.")
-    if api_key_input:
-        os.environ["OPENAI_API_KEY"] = api_key_input.strip()
+    
+    # Check if API key is available from environment
+    api_key_available = bool(os.getenv("OPENAI_API_KEY"))
+    if api_key_available:
+        st.success("✅ OpenAI API key loaded from environment")
+    else:
+        st.error("❌ OpenAI API key not found in .env file")
+        st.markdown("""
+        **To enable answer generation:**
+        1. Copy `.env.example` to `.env`
+        2. Add your OpenAI API key to the `.env` file
+        3. Restart the application
+        """)
 
     model_name = st.selectbox(
         "Embedding model",

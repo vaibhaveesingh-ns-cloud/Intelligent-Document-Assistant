@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 import streamlit as st
 
 # Parsing

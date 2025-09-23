@@ -7,6 +7,10 @@ import traceback
 from typing import List, Optional
 from uuid import uuid4
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -146,7 +150,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
             openai_api_key=request.openai_api_key,
         )
     except ValueError as exc:
+        logger.error(f"ValueError in chat endpoint: {exc}")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(f"Unexpected error in chat endpoint: {exc}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(exc)}") from exc
 
     sources = [SourceSchema(**source) for source in payload["sources"]]
     return ChatResponse(session_id=session_id, answer=payload["answer"], sources=sources)

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
+
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferWindowMemory
@@ -61,7 +66,9 @@ class DocumentAssistant:
         else:
             model_name = embedding_model or config.default_embedding_model
             descriptor = f"openai:{model_name}"
-            embeddings = OpenAIEmbeddings(model=model_name, api_key=openai_api_key)
+            # Use environment variable if no API key provided
+            api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+            embeddings = OpenAIEmbeddings(model=model_name, api_key=api_key)
 
         return descriptor, embeddings
 
@@ -189,37 +196,90 @@ class DocumentAssistant:
         if not self._vector_store:
             raise ValueError("No documents have been indexed yet.")
 
-        llm = ChatOpenAI(model=llm_model, temperature=0, api_key=openai_api_key)
-        retriever = self._vector_store.as_retriever(search_kwargs={"k": top_k})
-        session = self._session(session_id)
-
-        chain = ConversationalRetrievalChain.from_llm(
-            llm=llm,
-            retriever=retriever,
-            memory=session.memory,
-            return_source_documents=True,
-        )
-        result = chain.invoke({"question": question})
-        answer = result.get("answer", "")
-        source_documents = result.get("source_documents", [])
-
-        citations: List[SourceCitation] = []
-        for document in source_documents:
-            metadata = document.metadata or {}
-            preview = document.page_content[:300]
-            citations.append(
-                SourceCitation(
-                    source=metadata.get("source", "Unknown source"),
-                    preview=preview,
-                    metadata={k: str(v) for k, v in metadata.items()},
+        # Use environment variable if no API key provided
+        api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+        
+        # Check if we can use OpenAI
+        if not api_key:
+            # Return search results without LLM processing
+            retriever = self._vector_store.as_retriever(search_kwargs={"k": top_k})
+            docs = retriever.get_relevant_documents(question)
+            
+            citations: List[SourceCitation] = []
+            for document in docs:
+                metadata = document.metadata or {}
+                preview = document.page_content[:300]
+                citations.append(
+                    SourceCitation(
+                        source=metadata.get("source", "Unknown source"),
+                        preview=preview,
+                        metadata={k: str(v) for k, v in metadata.items()},
+                    )
                 )
-            )
+            
+            return {
+                "session_id": session_id,
+                "answer": "I found relevant documents but cannot generate an answer without OpenAI API access. Please check the source documents below for information related to your question.",
+                "sources": [citation.__dict__ for citation in citations],
+            }
+        
+        try:
+            llm = ChatOpenAI(model=llm_model, temperature=0, api_key=api_key)
+            retriever = self._vector_store.as_retriever(search_kwargs={"k": top_k})
+            session = self._session(session_id)
 
-        return {
-            "session_id": session_id,
-            "answer": answer,
-            "sources": [citation.__dict__ for citation in citations],
-        }
+            chain = ConversationalRetrievalChain.from_llm(
+                llm=llm,
+                retriever=retriever,
+                memory=session.memory,
+                return_source_documents=True,
+            )
+            result = chain.invoke({"question": question})
+            answer = result.get("answer", "")
+            source_documents = result.get("source_documents", [])
+
+            citations: List[SourceCitation] = []
+            for document in source_documents:
+                metadata = document.metadata or {}
+                preview = document.page_content[:300]
+                citations.append(
+                    SourceCitation(
+                        source=metadata.get("source", "Unknown source"),
+                        preview=preview,
+                        metadata={k: str(v) for k, v in metadata.items()},
+                    )
+                )
+
+            return {
+                "session_id": session_id,
+                "answer": answer,
+                "sources": [citation.__dict__ for citation in citations],
+            }
+        except Exception as e:
+            # If OpenAI fails (quota exceeded, etc.), fall back to document search
+            if "quota" in str(e).lower() or "429" in str(e):
+                retriever = self._vector_store.as_retriever(search_kwargs={"k": top_k})
+                docs = retriever.get_relevant_documents(question)
+                
+                citations: List[SourceCitation] = []
+                for document in docs:
+                    metadata = document.metadata or {}
+                    preview = document.page_content[:300]
+                    citations.append(
+                        SourceCitation(
+                            source=metadata.get("source", "Unknown source"),
+                            preview=preview,
+                            metadata={k: str(v) for k, v in metadata.items()},
+                        )
+                    )
+                
+                return {
+                    "session_id": session_id,
+                    "answer": "OpenAI quota exceeded. I found relevant documents but cannot generate an AI-powered answer. Please check the source documents below for information related to your question.",
+                    "sources": [citation.__dict__ for citation in citations],
+                }
+            else:
+                raise e
 
     def reset(self) -> None:
         """Clear cached conversation state and hashes (used for tests)."""
