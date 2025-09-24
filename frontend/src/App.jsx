@@ -25,41 +25,19 @@ function App() {
   const [status, setStatus] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isSending, setIsSending] = useState(false);
-  const [chunkSize, setChunkSize] = useState(1000);
-  const [chunkOverlap, setChunkOverlap] = useState(200);
-  const [embeddingOption, setEmbeddingOption] = useState('openai:text-embedding-3-small');
-  const [llmModel, setLlmModel] = useState('gpt-3.5-turbo');
-  const [apiKey, setApiKey] = useState('');
+  // Use backend defaults - no user configuration needed
+  const chunkSize = 1000;
+  const chunkOverlap = 200;
+  const embeddingOption = 'local:sentence-transformers/all-MiniLM-L6-v2'; // Use local embeddings by default
+  const llmModel = 'gpt-3.5-turbo';
+  const apiKey = ''; // API key comes from backend environment
 
   const acceptTypes = useMemo(
     () => '.pdf,.docx,.txt,.md,.pptx,.csv,.png,.jpg,.jpeg',
     []
   );
 
-  useEffect(() => {
-    const loadDefaults = async () => {
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/config`);
-        if (!response.ok) {
-          return;
-        }
-        const data = await response.json();
-        if (data?.defaults) {
-          setChunkSize(data.defaults.chunk_size ?? 1000);
-          setChunkOverlap(data.defaults.chunk_overlap ?? 200);
-          if (data.defaults.embedding_model) {
-            setEmbeddingOption(`openai:${data.defaults.embedding_model}`);
-          }
-          if (data.defaults.llm_model) {
-            setLlmModel(data.defaults.llm_model);
-          }
-        }
-      } catch (error) {
-        // ignore; backend might not be running during static preview
-      }
-    };
-    loadDefaults();
-  }, []);
+  // No need to load config from backend - using hardcoded defaults
 
   const onFilesAdded = useCallback((newFiles) => {
     setFiles((previous) => {
@@ -179,16 +157,6 @@ function App() {
           onClearFiles={onClearFiles}
           onUpload={handleUpload}
           isUploading={isUploading}
-          chunkSize={chunkSize}
-          setChunkSize={setChunkSize}
-          chunkOverlap={chunkOverlap}
-          setChunkOverlap={setChunkOverlap}
-          embeddingOption={embeddingOption}
-          setEmbeddingOption={setEmbeddingOption}
-          llmModel={llmModel}
-          setLlmModel={setLlmModel}
-          apiKey={apiKey}
-          setApiKey={setApiKey}
           status={status}
           accept={acceptTypes}
         />
