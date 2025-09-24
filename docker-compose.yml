@@ -38,4 +38,4 @@ services:
     restart: unless-stopped
 
  # Data directories created on host for persistence
-  volumes: {}
+volumes: {}
