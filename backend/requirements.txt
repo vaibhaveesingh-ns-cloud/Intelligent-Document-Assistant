@@ -8,4 +8,5 @@ langchain-openai
 fastapi
 uvicorn
 python-multipart
-python-multipart
+numpy
+pandas
