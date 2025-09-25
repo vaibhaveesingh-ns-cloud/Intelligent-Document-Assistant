@@ -13,7 +13,6 @@ load_dotenv()
 
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferWindowMemory
-from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_chroma import Chroma
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
@@ -54,21 +53,16 @@ class DocumentAssistant:
     def _resolve_embeddings(
         self,
         *,
-        use_local_embeddings: bool,
+        use_local_embeddings: bool,  # kept for API compatibility, ignored
         embedding_model: Optional[str],
-        local_embedding_model: Optional[str],
+        local_embedding_model: Optional[str],  # kept for API compatibility, ignored
         openai_api_key: Optional[str],
     ):
-        if use_local_embeddings:
-            model_name = local_embedding_model or config.default_local_embedding_model
-            descriptor = f"local:{model_name}"
-            embeddings = SentenceTransformerEmbeddings(model_name=model_name)
-        else:
-            model_name = embedding_model or config.default_embedding_model
-            descriptor = f"openai:{model_name}"
-            # Use environment variable if no API key provided
-            api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
-            embeddings = OpenAIEmbeddings(model=model_name, api_key=api_key)
+        # Always use OpenAI embeddings to keep the image lightweight and avoid PyTorch
+        model_name = embedding_model or config.default_embedding_model
+        descriptor = f"openai:{model_name}"
+        api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+        embeddings = OpenAIEmbeddings(model=model_name, api_key=api_key)
 
         return descriptor, embeddings
 
