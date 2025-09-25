@@ -13,13 +13,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     python3-dev \
     pkg-config \
-    libgl1 \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
     libgomp1 \
     tesseract-ocr \
     libjpeg62-turbo-dev \
     libpng-dev \
-    libtiff5 \
-    libopenjp2-7 \
+    libtiff5-dev \
+    libopenjp2-7-dev \
+    libwebp-dev \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
