@@ -7,8 +7,8 @@ WORKDIR /app
 
 # Copy backend requirements from the project root context
 COPY backend/requirements.txt /app/requirements.txt
-RUN pip3 install --no-cache-dir --upgrade pip3 setuptools wheel && \
-    pip3 install --no-cache-dir -r /app/requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    python -m pip install --no-cache-dir -r /app/requirements.txt
 
 COPY backend /app/backend
 
