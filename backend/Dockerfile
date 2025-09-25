@@ -1,9 +1,10 @@
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies needed for building/scientific Python packages
+# Install only essential build and image libs (avoid OpenGL/Tesseract to prevent apt failures)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
@@ -13,17 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     python3-dev \
     pkg-config \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
     libgomp1 \
-    tesseract-ocr \
     libjpeg62-turbo-dev \
     libpng-dev \
-    libtiff5-dev \
-    libopenjp2-7-dev \
-    libwebp-dev \
     zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
