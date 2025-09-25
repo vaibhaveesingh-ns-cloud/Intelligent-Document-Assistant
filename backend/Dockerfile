@@ -5,6 +5,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Install minimal build toolchain for packages that may compile from source
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    python3-dev \
+    cargo \
+    rustc \
+    cmake \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy backend requirements from the project root context
 COPY backend/requirements.txt /app/requirements.txt
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel && \

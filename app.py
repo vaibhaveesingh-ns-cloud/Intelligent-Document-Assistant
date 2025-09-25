@@ -48,7 +48,6 @@ try:
     from langchain.chains import ConversationalRetrievalChain
     from langchain.memory import ConversationBufferWindowMemory
     from langchain.prompts import PromptTemplate
-    from langchain_community.embeddings import SentenceTransformerEmbeddings
 except Exception as e:
     st.error(f"LangChain dependencies not installed: {e}")
     st.stop()
@@ -229,17 +228,18 @@ class EnhancedVectorStore:
         self.vectorstore = self._create_vectorstore()
 
     def _initialize_embeddings(self):
-        """Create an embedding function for the vector store."""
+        """Create an embedding function for the vector store. Uses OpenAI only to avoid heavy local models."""
 
-        if self.use_openai_embeddings and os.getenv("OPENAI_API_KEY"):
-            try:
-                return OpenAIEmbeddings()
-            except Exception as exc:  # pragma: no cover - best-effort warning
-                st.warning(
-                    f"Failed to initialize OpenAI embeddings: {exc}. Falling back to SentenceTransformer embeddings."
-                )
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            st.error("OpenAI API key is required for embeddings. Set OPENAI_API_KEY in your .env file.")
+            st.stop()
 
-        return SentenceTransformerEmbeddings(model_name=self.embedding_model)
+        try:
+            return OpenAIEmbeddings(model=os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small"))
+        except Exception as exc:  # pragma: no cover - runtime safety
+            st.error(f"Failed to initialize OpenAI embeddings: {exc}")
+            st.stop()
 
     def _create_vectorstore(self):
         """Create or retrieve a persistent Chroma collection."""
@@ -523,6 +523,7 @@ def ensure_vector_index(model_name: str, chunk_size: int, chunk_overlap: int) ->
             model_name=model_name,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            use_openai_embeddings=True,
         )
         st.session_state["conversation_turns"] = []
         st.session_state["last_contexts"] = []
@@ -669,6 +670,7 @@ with st.sidebar:
     api_key_available = bool(os.getenv("OPENAI_API_KEY"))
     if api_key_available:
         st.success("✅ OpenAI API key loaded from environment")
+        st.info("Using OpenAI embeddings (no PyTorch required)")
     else:
         st.error("❌ OpenAI API key not found in .env file")
         st.markdown("""
@@ -678,16 +680,8 @@ with st.sidebar:
         3. Restart the application
         """)
 
-    model_name = st.selectbox(
-        "Embedding model",
-        [
-            "sentence-transformers/all-MiniLM-L6-v2",
-            "sentence-transformers/all-MiniLM-L12-v2",
-            "sentence-transformers/paraphrase-MiniLM-L6-v2",
-        ],
-        index=0,
-        help="MiniLM models offer a good balance between speed and quality.",
-    )
+    # Embedding model name for OpenAI (optional override via env)
+    model_name = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
 
     chunk_size = st.slider("Chunk size (characters)", min_value=500, max_value=3000, value=1200, step=100)
     chunk_overlap = st.slider("Chunk overlap", min_value=0, max_value=600, value=200, step=50)
