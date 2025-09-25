@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Callable, Dict
 
 try:
-    import pdfplumber
+    import PyPDF2
 except Exception:  # pragma: no cover - optional dependency fallback
-    pdfplumber = None
+    PyPDF2 = None
 
 docx = None  # Removed to keep dependencies minimal
 Presentation = None  # Removed to keep dependencies minimal
@@ -29,11 +29,14 @@ def _require(condition: bool, message: str) -> None:
 
 
 def _load_pdf(file_bytes: bytes) -> str:
-    _require(pdfplumber is not None, "pdfplumber is required for PDF ingestion.")
+    _require(PyPDF2 is not None, "PyPDF2 is required for PDF ingestion.")
     text_parts = []
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
+    reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+    for page in reader.pages:
+        try:
             text_parts.append(page.extract_text() or "")
+        except Exception:
+            continue
     return "\n".join(text_parts)
 
 
