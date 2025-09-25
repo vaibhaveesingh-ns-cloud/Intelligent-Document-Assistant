@@ -13,8 +13,8 @@ load_dotenv()
 
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferWindowMemory
-from langchain_chroma import Chroma
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+import numpy as np
 
 from backend.config import config
 from backend.services.loaders import extract_text_from_bytes
@@ -42,10 +42,14 @@ class DocumentAssistant:
     """Facade that coordinates document ingestion and conversational retrieval."""
 
     def __init__(self) -> None:
-        self._vector_store: Optional[Chroma] = None
+        # In-memory index structures
         self._embedding_descriptor: Optional[str] = None
+        self._embeddings: Optional[OpenAIEmbeddings] = None
         self._known_hashes: set[str] = set()
         self._sessions: Dict[str, SessionState] = {}
+        self._doc_texts: list[str] = []
+        self._doc_metas: list[Dict[str, str]] = []
+        self._vectors: Optional[np.ndarray] = None  # shape: (N, D)
 
     # ------------------------------------------------------------------
     # Embeddings + Vector Store
@@ -66,43 +70,24 @@ class DocumentAssistant:
 
         return descriptor, embeddings
 
-    def _ensure_vector_store(self, descriptor: str, embeddings) -> Chroma:
-        if self._vector_store is None:
-            import chromadb
-            from chromadb.config import Settings
-            
-            # Create persistent Chroma client
-            chroma_client = chromadb.PersistentClient(
-                path=config.chroma_persist_directory,
-                settings=Settings(anonymized_telemetry=False)
-            )
-            
-            self._vector_store = Chroma(
-                client=chroma_client,
-                collection_name=config.collection_name,
-                embedding_function=embeddings,
-            )
+    def _ensure_embedding_model(self, descriptor: str, embeddings: OpenAIEmbeddings) -> None:
+        if self._embedding_descriptor is None:
             self._embedding_descriptor = descriptor
-            self._hydrate_hash_cache()
-        elif descriptor != self._embedding_descriptor:
+            self._embeddings = embeddings
+            return
+        if descriptor != self._embedding_descriptor:
             raise ValueError(
                 "Existing index was built with a different embedding model. "
-                "Please reset the storage directory before switching embeddings."
+                "Please reset the index before switching embeddings."
             )
-        return self._vector_store
 
-    def _hydrate_hash_cache(self) -> None:
-        if not self._vector_store:
+    def _normalize_vectors(self) -> None:
+        if self._vectors is None or len(self._vectors) == 0:
             return
-        try:
-            existing = self._vector_store.get(include=["metadatas"])
-        except Exception:
-            existing = None
-        if not existing:
-            return
-        for metadata in existing.get("metadatas", []):
-            if metadata and metadata.get("content_hash"):
-                self._known_hashes.add(metadata["content_hash"])
+        # Normalize to unit vectors for cosine similarity via dot product
+        norms = np.linalg.norm(self._vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        self._vectors = self._vectors / norms
 
     # ------------------------------------------------------------------
     # Ingestion
@@ -124,7 +109,7 @@ class DocumentAssistant:
             local_embedding_model=local_embedding_model,
             openai_api_key=openai_api_key,
         )
-        vector_store = self._ensure_vector_store(descriptor, embeddings)
+        self._ensure_embedding_model(descriptor, embeddings)
 
         texts_and_metadata: List[Tuple[str, Dict[str, str]]] = []
         skipped = 0
@@ -156,8 +141,19 @@ class DocumentAssistant:
         documents = processor.build_documents(build_raw_documents(texts_and_metadata))
 
         if documents:
-            vector_store.add_documents(documents)
-            # ChromaDB persistence is handled automatically with PersistentClient
+            # Compute embeddings for all new chunks
+            chunk_texts = [d.page_content for d in documents]
+            vectors = np.array(self._embeddings.embed_documents(chunk_texts))  # type: ignore[union-attr]
+
+            # Append to in-memory index
+            self._doc_texts.extend(chunk_texts)
+            self._doc_metas.extend([d.metadata for d in documents])
+            if self._vectors is None or self._vectors.size == 0:
+                self._vectors = vectors
+            else:
+                self._vectors = np.vstack([self._vectors, vectors])
+
+            self._normalize_vectors()
 
         return {"ingested": len(documents), "skipped": skipped}
 
@@ -187,60 +183,69 @@ class DocumentAssistant:
         llm_model: str,
         openai_api_key: Optional[str],
     ) -> Dict[str, object]:
-        if not self._vector_store:
+        if self._vectors is None or len(self._doc_texts) == 0:
             raise ValueError("No documents have been indexed yet.")
 
         # Use environment variable if no API key provided
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
         
-        # Check if we can use OpenAI
+        # Compute query embedding and cosine similarity
+        query_vec = np.array(self._embeddings.embed_query(question))  # type: ignore[union-attr]
+        qn = np.linalg.norm(query_vec)
+        if qn == 0:
+            qn = 1.0
+        query_vec = query_vec / qn
+        sims = np.dot(self._vectors, query_vec)  # type: ignore[arg-type]
+        top_idx = np.argsort(-sims)[:top_k]
+        retrieved = [(self._doc_texts[i], self._doc_metas[i], float(sims[i])) for i in top_idx]
+
         if not api_key:
-            # Return search results without LLM processing
-            retriever = self._vector_store.as_retriever(search_kwargs={"k": top_k})
-            docs = retriever.get_relevant_documents(question)
-            
+            # Return retrieved context without LLM answer
             citations: List[SourceCitation] = []
-            for document in docs:
-                metadata = document.metadata or {}
-                preview = document.page_content[:300]
+            for text, meta, _score in retrieved:
+                preview = text[:300]
                 citations.append(
                     SourceCitation(
-                        source=metadata.get("source", "Unknown source"),
+                        source=meta.get("source", "Unknown source"),
                         preview=preview,
-                        metadata={k: str(v) for k, v in metadata.items()},
+                        metadata={k: str(v) for k, v in meta.items()},
                     )
                 )
-            
             return {
                 "session_id": session_id,
-                "answer": "I found relevant documents but cannot generate an answer without OpenAI API access. Please check the source documents below for information related to your question.",
+                "answer": "Please provide an OpenAI API key to enable answer generation.",
                 "sources": [citation.__dict__ for citation in citations],
             }
         
         try:
+            # Build a simple prompt with retrieved context
             llm = ChatOpenAI(model=llm_model, temperature=0, api_key=api_key)
-            retriever = self._vector_store.as_retriever(search_kwargs={"k": top_k})
-            session = self._session(session_id)
+            context_blocks = []
+            for i, (text, meta, score) in enumerate(retrieved, start=1):
+                source = meta.get("source", f"doc_{i}")
+                context_blocks.append(f"[Source: {source}]\n{text}")
+            context = "\n\n".join(context_blocks)
 
-            chain = ConversationalRetrievalChain.from_llm(
-                llm=llm,
-                retriever=retriever,
-                memory=session.memory,
-                return_source_documents=True,
+            prompt = (
+                "You are a helpful assistant. Answer the question using ONLY the context. "
+                "If the answer is not present in the context, say you don't know.\n\n"
+                f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
             )
-            result = chain.invoke({"question": question})
-            answer = result.get("answer", "")
-            source_documents = result.get("source_documents", [])
+
+            session = self._session(session_id)
+            # Store minimal memory (question only)
+            session.memory.save_context({"input": question}, {"output": ""})
+
+            answer = llm.invoke(prompt).content  # type: ignore[attr-defined]
 
             citations: List[SourceCitation] = []
-            for document in source_documents:
-                metadata = document.metadata or {}
-                preview = document.page_content[:300]
+            for text, meta, _score in retrieved:
+                preview = text[:300]
                 citations.append(
                     SourceCitation(
-                        source=metadata.get("source", "Unknown source"),
+                        source=meta.get("source", "Unknown source"),
                         preview=preview,
-                        metadata={k: str(v) for k, v in metadata.items()},
+                        metadata={k: str(v) for k, v in meta.items()},
                     )
                 )
 
@@ -280,7 +285,8 @@ class DocumentAssistant:
 
         self._sessions.clear()
         self._known_hashes.clear()
-        if self._vector_store is not None:
-            self._vector_store.delete_collection()
-            self._vector_store = None
-            self._embedding_descriptor = None
+        self._embedding_descriptor = None
+        self._embeddings = None
+        self._doc_texts = []
+        self._doc_metas = []
+        self._vectors = None
