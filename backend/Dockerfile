@@ -1,24 +1,7 @@
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive
-
-# Install only essential build and image libs (avoid OpenGL/Tesseract to prevent apt failures)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    g++ \
-    make \
-    cmake \
-    git \
-    python3-dev \
-    pkg-config \
-    libgomp1 \
-    libjpeg62-turbo-dev \
-    libpng-dev \
-    zlib1g-dev \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
